@@ -4,23 +4,50 @@ name: Build Label Printer App
 on:
   workflow_dispatch:
     inputs:
-      version_tag:
-        description: 'Version Tag (e.g., v1.0.1)'
+      # 允许用户选择版本递增的类型 (patch, minor, major)
+      release_type:
+        description: 'Release Type (patch, minor, major)'
         required: true
-        default: 'v1.0.0'
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
-# 权限设置：允许发布 Release 和 删除旧记录
+# 权限设置：必须有写入 contents 的权限才能创建 tag 和 Release
 permissions:
   contents: write
   actions: write
 
 jobs:
   build_and_release:
+    # 假设您的代码需要 Windows 环境
     runs-on: windows-latest
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        # 必须获取所有历史记录，以便正确获取最新 tag，这是自动版本递增的关键
+        fetch-depth: 0 
+
+    # ----------------------------------------------------
+    # 1. 自动生成新的版本号 (Tag)
+    # ----------------------------------------------------
+    - name: Bump Version and Create Tag
+      id: tag_version
+      # 使用 anothrNick/github-tag-action 自动处理版本号逻辑
+      uses: anothrNick/github-tag-action@1.70.0 
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        WITH_V: true # 版本号前缀加上 'v' (例如 v1.0.1)
+        # 根据用户输入来决定版本递增的类型：patch, minor, 或 major
+        DEFAULT_BUMP: ${{ github.event.inputs.release_type }} 
+        
+    - name: Set New Version Tag Environment Variable
+      # 将新的版本号 (例如 v1.0.1) 设置为环境变量供后续步骤使用
+      run: echo "NEW_VERSION=${{ steps.tag_version.outputs.new_tag }}" >> $GITHUB_ENV
 
     - name: Set up Python 3.8
       uses: actions/setup-python@v5
@@ -29,16 +56,20 @@ jobs:
         architecture: 'x64'
 
     - name: Install dependencies
+      # 确保 run 命令是在新的工作目录下运行的
       run: |
         python -m pip install --upgrade pip
+        # 假设 requirements.txt 在 LabelPrinterApp/ 目录下
         pip install -r requirements.txt
         pip install pyinstaller
+      working-directory: LabelPrinterApp # 修正：确保在正确的子目录执行
 
     - name: Update Version File
       shell: python
       run: |
+        # 使用自动生成的版本号 NEW_VERSION 来更新版本文件
         import os
-        version = "${{ inputs.version_tag }}"
+        version = os.environ['NEW_VERSION']
         try:
             with open('src/version.py', 'w') as f:
                 f.write(f'APP_VERSION = "{version}"\n')
@@ -46,29 +77,32 @@ jobs:
             os.makedirs('src', exist_ok=True)
             with open('src/version.py', 'w') as f:
                 f.write(f'APP_VERSION = "{version}"\n')
+      working-directory: LabelPrinterApp # 修正：确保在正确的子目录修改文件
 
     - name: Build with PyInstaller
+      # 确保 run 命令是在新的工作目录下运行的
       run: |
         # 打包为单个 EXE 文件
-        # 如果 assets/icon.ico 不存在，请删除 --icon 参数
-        # 如果 assets 文件夹为空，请删除 --add-data 参数
         pyinstaller --noconfirm --onefile --windowed --name "LabelPrinter" --icon "assets/icon.ico" --add-data "assets;assets" main.py
+      working-directory: LabelPrinterApp # 修正：确保在正确的子目录运行构建命令
 
     # 步骤 1: 上传到构建产物 (Artifacts) - 作为备份
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: LabelPrinter-${{ inputs.version_tag }}
-        path: dist/LabelPrinter.exe
+        name: LabelPrinter-${{ env.NEW_VERSION }}
+        # path 需要是相对于仓库根目录的路径
+        path: LabelPrinterApp/dist/LabelPrinter.exe
 
     # 步骤 2: 发布到 Releases 页面 (正式发布)
     - name: Create Release
       uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/') || inputs.version_tag != ''
+      # 每次成功构建后都发布 Release
       with:
-        tag_name: ${{ inputs.version_tag }}
-        name: Release ${{ inputs.version_tag }}
-        files: dist/LabelPrinter.exe
+        tag_name: ${{ env.NEW_VERSION }} # 使用自动生成的版本号
+        name: Release ${{ env.NEW_VERSION }}
+        # files 需要是相对于仓库根目录的路径
+        files: LabelPrinterApp/dist/LabelPrinter.exe
         draft: false
         prerelease: false
       env:
